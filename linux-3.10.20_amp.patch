@@ -1,0 +1,1464 @@
+diff -ruN linux-3.10.20-orig/fs/eventpoll.c linux-3.10.20/fs/eventpoll.c
+--- linux-3.10.20-orig/fs/eventpoll.c	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/fs/eventpoll.c	2013-12-20 15:57:44.962410029 +0400
+@@ -175,6 +175,8 @@
+ struct eventpoll {
+ 	/* Protect the access to this structure */
+ 	spinlock_t lock;
++    
++    int index;
+ 
+ 	/*
+ 	 * This mutex is used to ensure that files are not removed
+@@ -773,11 +775,14 @@
+ 	return 0;
+ }
+ 
+-static inline unsigned int ep_item_poll(struct epitem *epi, poll_table *pt)
++static inline unsigned int ep_item_poll(struct epitem *epi, poll_table *pt, int i)
+ {
+ 	pt->_key = epi->event.events;
+ 
+-	return epi->ffd.file->f_op->poll(epi->ffd.file, pt) & epi->event.events;
++    if (i == -1) 
++    	return epi->ffd.file->f_op->poll(epi->ffd.file, pt) & epi->event.events;
++
++    return epi->ffd.file->f_op->poll2(epi->ffd.file, pt, i) & epi->event.events;
+ }
+ 
+ static int ep_read_events_proc(struct eventpoll *ep, struct list_head *head,
+@@ -789,7 +794,7 @@
+ 	init_poll_funcptr(&pt, NULL);
+ 
+ 	list_for_each_entry_safe(epi, tmp, head, rdllink) {
+-		if (ep_item_poll(epi, &pt))
++		if (ep_item_poll(epi, &pt, ep->index))
+ 			return POLLIN | POLLRDNORM;
+ 		else {
+ 			/*
+@@ -1271,7 +1276,7 @@
+ 	 * this operation completes, the poll callback can start hitting
+ 	 * the new item.
+ 	 */
+-	revents = ep_item_poll(epi, &epq.pt);
++	revents = ep_item_poll(epi, &epq.pt, ep->index);
+ 
+ 	/*
+ 	 * We have to check if something went wrong during the poll wait queue
+@@ -1403,7 +1408,7 @@
+ 	 * Get current event bits. We can safely use the file* here because
+ 	 * its usage count has been increased by the caller of this function.
+ 	 */
+-	revents = ep_item_poll(epi, &pt);
++	revents = ep_item_poll(epi, &pt, ep->index);
+ 
+ 	/*
+ 	 * If the item is "hot" and it is not registered inside the ready
+@@ -1471,7 +1476,7 @@
+ 
+ 		list_del_init(&epi->rdllink);
+ 
+-		revents = ep_item_poll(epi, &pt);
++		revents = ep_item_poll(epi, &pt, ep->index);
+ 
+ 		/*
+ 		 * If the event mask intersect the caller-requested one,
+@@ -1738,14 +1743,22 @@
+ 	/* Check the EPOLL_* constant for consistency.  */
+ 	BUILD_BUG_ON(EPOLL_CLOEXEC != O_CLOEXEC);
+ 
+-	if (flags & ~EPOLL_CLOEXEC)
+-		return -EINVAL;
++	//if (flags & ~EPOLL_CLOEXEC)
++	//	return -EINVAL;
+ 	/*
+ 	 * Create the internal data structure ("struct eventpoll").
+ 	 */
+ 	error = ep_alloc(&ep);
+ 	if (error < 0)
+ 		return error;
++    
++    ep->index = -1;
++
++    /* maximum 64 CPU */
++	if (flags < 64 && flags >= 0) {
++		ep->index = flags;
++	}
++    printk(KERN_ALERT "sys_epoll_create1(): ep->index = %d\n", ep->index);
+ 	/*
+ 	 * Creates all the items needed to setup an eventpoll file. That is,
+ 	 * a file structure and a free file descriptor.
+@@ -1777,7 +1790,7 @@
+ 	if (size <= 0)
+ 		return -EINVAL;
+ 
+-	return sys_epoll_create1(0);
++	return sys_epoll_create1(size);
+ }
+ 
+ /*
+diff -ruN linux-3.10.20-orig/include/linux/fs.h linux-3.10.20/include/linux/fs.h
+--- linux-3.10.20-orig/include/linux/fs.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/linux/fs.h	2013-12-20 12:36:18.946314974 +0400
+@@ -1523,6 +1523,7 @@
+ 	ssize_t (*aio_write) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
+ 	int (*readdir) (struct file *, void *, filldir_t);
+ 	unsigned int (*poll) (struct file *, struct poll_table_struct *);
++	unsigned int (*poll2) (struct file *, struct poll_table_struct *, int);	
+ 	long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
+ 	long (*compat_ioctl) (struct file *, unsigned int, unsigned long);
+ 	int (*mmap) (struct file *, struct vm_area_struct *);
+diff -ruN linux-3.10.20-orig/include/linux/net.h linux-3.10.20/include/linux/net.h
+--- linux-3.10.20-orig/include/linux/net.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/linux/net.h	2013-12-22 14:43:24.354100898 +0400
+@@ -138,11 +138,15 @@
+ 				      struct socket *sock2);
+ 	int		(*accept)    (struct socket *sock,
+ 				      struct socket *newsock, int flags);
++	int		(*accept2)    (struct socket *sock,
++				      struct socket *newsock, int flags, int i);	
+ 	int		(*getname)   (struct socket *sock,
+ 				      struct sockaddr *addr,
+ 				      int *sockaddr_len, int peer);
+ 	unsigned int	(*poll)	     (struct file *file, struct socket *sock,
+-				      struct poll_table_struct *wait);
++				      struct poll_table_struct *wait);	
++	unsigned int	(*poll2)	     (struct file *file, struct socket *sock,
++				      struct poll_table_struct *wait, int);	
+ 	int		(*ioctl)     (struct socket *sock, unsigned int cmd,
+ 				      unsigned long arg);
+ #ifdef CONFIG_COMPAT
+@@ -150,6 +154,7 @@
+ 				      unsigned long arg);
+ #endif
+ 	int		(*listen)    (struct socket *sock, int len);
++	int		(*listen2)   (struct socket *sock, int len, int n);	
+ 	int		(*shutdown)  (struct socket *sock, int flags);
+ 	int		(*setsockopt)(struct socket *sock, int level,
+ 				      int optname, char __user *optval, unsigned int optlen);
+@@ -252,8 +257,10 @@
+ extern int kernel_bind(struct socket *sock, struct sockaddr *addr,
+ 		       int addrlen);
+ extern int kernel_listen(struct socket *sock, int backlog);
+-extern int kernel_accept(struct socket *sock, struct socket **newsock,
+-			 int flags);
++extern int kernel_listen2(struct socket *sock, int backlog, int n);
++
++extern int kernel_accept(struct socket *sock, struct socket **newsock, int flags);
++
+ extern int kernel_connect(struct socket *sock, struct sockaddr *addr,
+ 			  int addrlen, int flags);
+ extern int kernel_getsockname(struct socket *sock, struct sockaddr *addr,
+diff -ruN linux-3.10.20-orig/include/linux/syscalls.h linux-3.10.20/include/linux/syscalls.h
+--- linux-3.10.20-orig/include/linux/syscalls.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/linux/syscalls.h	2013-12-16 21:03:54.814852165 +0400
+@@ -574,6 +574,7 @@
+ asmlinkage long sys_connect(int, struct sockaddr __user *, int);
+ asmlinkage long sys_accept(int, struct sockaddr __user *, int __user *);
+ asmlinkage long sys_accept4(int, struct sockaddr __user *, int __user *, int);
++asmlinkage long sys_accept2(int, struct sockaddr __user *, int __user *, int, int);
+ asmlinkage long sys_getsockname(int, struct sockaddr __user *, int __user *);
+ asmlinkage long sys_getpeername(int, struct sockaddr __user *, int __user *);
+ asmlinkage long sys_send(int, void __user *, size_t, unsigned);
+@@ -593,6 +594,7 @@
+ asmlinkage long sys_socketpair(int, int, int, int __user *);
+ asmlinkage long sys_socketcall(int call, unsigned long __user *args);
+ asmlinkage long sys_listen(int, int);
++asmlinkage long sys_listen2(int, int, int);
+ asmlinkage long sys_poll(struct pollfd __user *ufds, unsigned int nfds,
+ 				int timeout);
+ asmlinkage long sys_select(int n, fd_set __user *inp, fd_set __user *outp,
+diff -ruN linux-3.10.20-orig/include/net/inet_common.h linux-3.10.20/include/net/inet_common.h
+--- linux-3.10.20-orig/include/net/inet_common.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/net/inet_common.h	2013-12-16 22:04:32.628557553 +0400
+@@ -21,6 +21,7 @@
+ extern int inet_dgram_connect(struct socket *sock, struct sockaddr *uaddr,
+ 			      int addr_len, int flags);
+ extern int inet_accept(struct socket *sock, struct socket *newsock, int flags);
++extern int inet_accept2(struct socket *sock, struct socket *newsock, int flags, int i);
+ extern int inet_sendmsg(struct kiocb *iocb, struct socket *sock,
+ 			struct msghdr *msg, size_t size);
+ extern ssize_t inet_sendpage(struct socket *sock, struct page *page, int offset,
+@@ -29,6 +30,7 @@
+ 			struct msghdr *msg, size_t size, int flags);
+ extern int inet_shutdown(struct socket *sock, int how);
+ extern int inet_listen(struct socket *sock, int backlog);
++extern int inet_listen2(struct socket *sock, int backlog, int i);
+ extern void inet_sock_destruct(struct sock *sk);
+ extern int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len);
+ extern int inet_getname(struct socket *sock, struct sockaddr *uaddr,
+diff -ruN linux-3.10.20-orig/include/net/inet_connection_sock.h linux-3.10.20/include/net/inet_connection_sock.h
+--- linux-3.10.20-orig/include/net/inet_connection_sock.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/net/inet_connection_sock.h	2013-12-20 12:10:48.253021654 +0400
+@@ -23,6 +23,10 @@
+ #include <net/inet_sock.h>
+ #include <net/request_sock.h>
+ 
++
++#include <linux/jhash.h>
++
++
+ #define INET_CSK_DEBUG 1
+ 
+ /* Cancel timers, when they are not required. */
+@@ -242,6 +246,7 @@
+ }
+ 
+ extern struct sock *inet_csk_accept(struct sock *sk, int flags, int *err);
++extern struct sock *inet_csk_accept2(struct sock *sk, int flags, int *err, int i);
+ 
+ extern struct request_sock *inet_csk_search_req(const struct sock *sk,
+ 						struct request_sock ***prevp,
+@@ -260,12 +265,36 @@
+ 						   const struct request_sock *req);
+ 
+ static inline void inet_csk_reqsk_queue_add(struct sock *sk,
+-					    struct request_sock *req,
+-					    struct sock *child)
+-{
++					                        struct request_sock *req,
++					                        struct sock *child) {
++	printk (KERN_ALERT "inet_csk_reqsk_queue_add(): before reqsk_queue_add()\n");
+ 	reqsk_queue_add(&inet_csk(sk)->icsk_accept_queue, req, sk, child);
+ }
+ 
++
++static inline u32 inet_synq_hash(const __be32 raddr, const __be16 rport,
++				 const u32 rnd, const u32 synq_hsize)
++{
++	return jhash_2words((__force u32)raddr, (__force u32)rport, rnd) & (synq_hsize - 1);
++}
++
++
++
++static inline void inet_csk_reqsk_queue_add2(struct sock *sk,
++					                         struct request_sock *req,
++					                         struct sock *child) {
++
++    struct inet_connection_sock *icsk = inet_csk(sk);
++
++    const u32 i = inet_synq_hash(inet_rsk(req)->rmt_addr, inet_rsk(req)->rmt_port,
++                                 icsk->icsk_accept_queue.accept_opt->hash_rnd, 
++                                 icsk->icsk_accept_queue.accept_opt->nr_table_entries);
++    
++    printk (KERN_ALERT "inet_csk_reqsk_queue_add2(): before reqsk_queue_add2(), hash = %d\n", i);
++	
++	reqsk_queue_add2(&inet_csk(sk)->icsk_accept_queue, req, sk, child, i);
++}
++
+ extern void inet_csk_reqsk_queue_hash_add(struct sock *sk,
+ 					  struct request_sock *req,
+ 					  unsigned long timeout);
+@@ -328,11 +357,19 @@
+  */
+ static inline unsigned int inet_csk_listen_poll(const struct sock *sk)
+ {
+-	return !reqsk_queue_empty(&inet_csk(sk)->icsk_accept_queue) ?
+-			(POLLIN | POLLRDNORM) : 0;
++	printk(KERN_ALERT "inet_csk_listen_poll(): before reqsk_queue_empty()\n");
++	return !reqsk_queue_empty(&inet_csk(sk)->icsk_accept_queue) ? (POLLIN | POLLRDNORM) : 0;		
++}
++
++static inline unsigned int inet_csk_listen_poll2(const struct sock *sk, int i)
++{
++	printk(KERN_ALERT "inet_csk_listen_poll2(): before reqsk_queue_empty2()\n");
++	return !reqsk_queue_empty2(&inet_csk(sk)->icsk_accept_queue, i) ? (POLLIN | POLLRDNORM) : 0;
+ }
+ 
+ extern int  inet_csk_listen_start(struct sock *sk, const int nr_table_entries);
++extern int  inet_csk_listen_start2(struct sock *sk, const int nr_table_entries, int n);
++
+ extern void inet_csk_listen_stop(struct sock *sk);
+ 
+ extern void inet_csk_addr2sockaddr(struct sock *sk, struct sockaddr *uaddr);
+diff -ruN linux-3.10.20-orig/include/net/request_sock.h linux-3.10.20/include/net/request_sock.h
+--- linux-3.10.20-orig/include/net/request_sock.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/net/request_sock.h	2013-12-22 12:54:23.091491293 +0400
+@@ -19,9 +19,10 @@
+ #include <linux/spinlock.h>
+ #include <linux/types.h>
+ #include <linux/bug.h>
+-
+ #include <net/sock.h>
+ 
++
++
+ struct request_sock;
+ struct sk_buff;
+ struct dst_entry;
+@@ -131,6 +132,22 @@
+ 	int		max_qlen;	/* != 0 iff TFO is currently enabled */
+ };
+ 
++
++/* for experemental syscall listen2() */
++struct estab_tbl_entry {
++	struct request_sock	*rskq_accept_head;
++	struct request_sock	*rskq_accept_tail;
++};
++
++
++/* for experemental syscall listen2() */
++struct accept_sock {
++	u32						hash_rnd;
++	u32						nr_table_entries;
++	struct estab_tbl_entry	estab_table[0];
++};
++
++
+ /** struct request_sock_queue - queue of request_socks
+  *
+  * @rskq_accept_head - FIFO head of established children
+@@ -160,11 +177,31 @@
+ 					     * to determine if TFO is enabled
+ 					     * right at this moment.
+ 					     */
++
++    /* for compatibility bettwen listen2() and listen()
++	 * if (listen2) { 
++	 *     inet_csk_reqsk_queue_add2();
++	 *                 |
++	 *                 |-> reqsk_queue_add2()
++	 *  } 
++	 *  else {
++	 *     inet_csk_reqsk_queue_add();
++	 *                 |
++	 *                 |-> reqsk_queue_add()
++	 *  } 
++	 */
++    int  listen2;
++
++    /* for experemental syscall listen2() */					     
++	struct accept_sock *accept_opt;
+ };
+ 
+ extern int reqsk_queue_alloc(struct request_sock_queue *queue,
+ 			     unsigned int nr_table_entries);
+ 
++extern int reqsk_queue_alloc2(struct request_sock_queue *queue,
++			     unsigned int nr_table_entries, int n);
++
+ extern void __reqsk_queue_destroy(struct request_sock_queue *queue);
+ extern void reqsk_queue_destroy(struct request_sock_queue *queue);
+ extern void reqsk_fastopen_remove(struct sock *sk,
+@@ -179,11 +216,28 @@
+ 	return req;
+ }
+ 
++static inline struct request_sock *
++	reqsk_queue_yank_acceptq2(struct request_sock_queue *queue, int i)
++{
++	struct request_sock *req = queue->accept_opt->estab_table[i].rskq_accept_head;
++
++	queue->accept_opt->estab_table[i].rskq_accept_head = NULL;
++	return req;
++}
++
+ static inline int reqsk_queue_empty(struct request_sock_queue *queue)
+ {
+ 	return queue->rskq_accept_head == NULL;
+ }
+ 
++
++static inline int reqsk_queue_empty2(struct request_sock_queue *queue, int i)
++{
++	printk(KERN_ALERT "reqsk_queue_empty2(): i = %d\n", i);
++	return queue->accept_opt->estab_table[i].rskq_accept_head == NULL;
++}
++
++
+ static inline void reqsk_queue_unlink(struct request_sock_queue *queue,
+ 				      struct request_sock *req,
+ 				      struct request_sock **prev_req)
+@@ -194,10 +248,9 @@
+ }
+ 
+ static inline void reqsk_queue_add(struct request_sock_queue *queue,
+-				   struct request_sock *req,
+-				   struct sock *parent,
+-				   struct sock *child)
+-{
++				                   struct request_sock *req,
++				                   struct sock *parent,
++				                   struct sock *child) {
+ 	req->sk = child;
+ 	sk_acceptq_added(parent);
+ 
+@@ -210,6 +263,26 @@
+ 	req->dl_next = NULL;
+ }
+ 
++
++
++static inline void reqsk_queue_add2(struct request_sock_queue *queue,
++				                    struct request_sock *req,
++				                    struct sock *parent,
++				                    struct sock *child,
++				                    int i) {
++	req->sk = child;
++	sk_acceptq_added(parent);
++
++
++	if (queue->accept_opt->estab_table[i].rskq_accept_head == NULL)
++		queue->accept_opt->estab_table[i].rskq_accept_head = req;
++	else
++		queue->accept_opt->estab_table[i].rskq_accept_tail->dl_next = req;
++
++	queue->accept_opt->estab_table[i].rskq_accept_tail = req;
++	req->dl_next = NULL;
++}
++
+ static inline struct request_sock *reqsk_queue_remove(struct request_sock_queue *queue)
+ {
+ 	struct request_sock *req = queue->rskq_accept_head;
+@@ -222,6 +295,20 @@
+ 
+ 	return req;
+ }
++
++
++static inline struct request_sock *reqsk_queue_remove2(struct request_sock_queue *queue, int i)
++{
++	struct request_sock *req = queue->accept_opt->estab_table[i].rskq_accept_head;
++
++	WARN_ON(req == NULL);
++
++	queue->accept_opt->estab_table[i].rskq_accept_head = req->dl_next;
++	if (queue->accept_opt->estab_table[i].rskq_accept_head == NULL)
++		queue->accept_opt->estab_table[i].rskq_accept_tail = NULL;
++
++	return req;
++}
+ 
+ static inline int reqsk_queue_removed(struct request_sock_queue *queue,
+ 				      struct request_sock *req)
+diff -ruN linux-3.10.20-orig/include/net/sock.h linux-3.10.20/include/net/sock.h
+--- linux-3.10.20-orig/include/net/sock.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/net/sock.h	2013-12-20 14:20:44.142669917 +0400
+@@ -371,6 +371,7 @@
+ 				sk_err_soft;
+ 	unsigned short		sk_ack_backlog;
+ 	unsigned short		sk_max_ack_backlog;
++	int                 sk_bqueues;
+ 	__u32			sk_priority;
+ #if IS_ENABLED(CONFIG_NETPRIO_CGROUP)
+ 	__u32			sk_cgrp_prioidx;
+@@ -893,6 +894,7 @@
+ 	int			(*disconnect)(struct sock *sk, int flags);
+ 
+ 	struct sock *		(*accept)(struct sock *sk, int flags, int *err);
++    struct sock *		(*accept2)(struct sock *sk, int flags, int *err, int i);
+ 
+ 	int			(*ioctl)(struct sock *sk, int cmd,
+ 					 unsigned long arg);
+diff -ruN linux-3.10.20-orig/include/net/tcp.h linux-3.10.20/include/net/tcp.h
+--- linux-3.10.20-orig/include/net/tcp.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/net/tcp.h	2013-12-22 14:44:57.363044608 +0400
+@@ -438,6 +438,8 @@
+ extern void tcp_init_sock(struct sock *sk);
+ extern unsigned int tcp_poll(struct file * file, struct socket *sock,
+ 			     struct poll_table_struct *wait);
++extern unsigned int tcp_poll2(struct file * file, struct socket *sock,
++			     struct poll_table_struct *wait, int);
+ extern int tcp_getsockopt(struct sock *sk, int level, int optname,
+ 			  char __user *optval, int __user *optlen);
+ extern int tcp_setsockopt(struct sock *sk, int level, int optname,
+diff -ruN linux-3.10.20-orig/include/uapi/linux/net.h linux-3.10.20/include/uapi/linux/net.h
+--- linux-3.10.20-orig/include/uapi/linux/net.h	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/include/uapi/linux/net.h	2013-12-16 21:22:31.454801157 +0400
+@@ -43,6 +43,8 @@
+ #define SYS_ACCEPT4	18		/* sys_accept4(2)		*/
+ #define SYS_RECVMMSG	19		/* sys_recvmmsg(2)		*/
+ #define SYS_SENDMMSG	20		/* sys_sendmmsg(2)		*/
++#define SYS_LISTEN2		21		/* sys_listen2(2)		*/
++#define SYS_ACCEPT2		22		/* sys_accept2(2)		*/
+ 
+ typedef enum {
+ 	SS_FREE = 0,			/* not allocated		*/
+diff -ruN linux-3.10.20-orig/net/core/request_sock.c linux-3.10.20/net/core/request_sock.c
+--- linux-3.10.20-orig/net/core/request_sock.c	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/net/core/request_sock.c	2013-12-18 12:01:58.882310441 +0400
+@@ -20,6 +20,9 @@
+ 
+ #include <net/request_sock.h>
+ 
++#include <linux/module.h>  /* Needed by all modules */
++#include <linux/kernel.h>  /* Needed for KERN_ALERT */
++ 
+ /*
+  * Maximum number of SYN_RECV sockets in queue per LISTEN socket.
+  * One SYN_RECV socket costs about 80bytes on a 32bit machine.
+@@ -70,10 +73,81 @@
+ 	return 0;
+ }
+ 
+-void __reqsk_queue_destroy(struct request_sock_queue *queue)
++
++int reqsk_queue_alloc2(struct request_sock_queue *queue,
++		      unsigned int nr_table_entries, int n)
+ {
++	u32 i;
++	size_t lopt_size = sizeof(struct listen_sock);
+ 	struct listen_sock *lopt;
+-	size_t lopt_size;
++	size_t aopt_size = sizeof(struct accept_sock);
++	struct accept_sock *aopt;	
++
++    //printk(KERN_ALERT "enter to reqsk_queue_alloc2()!\n");
++    //printk(KERN_ALERT "argument n = %d\n", n);
++    
++    /****************************************/
++    /* allocate and init struct listen_sock */
++    /****************************************/
++	nr_table_entries = min_t(u32, nr_table_entries, sysctl_max_syn_backlog);
++	nr_table_entries = max_t(u32, nr_table_entries, 8);
++	nr_table_entries = roundup_pow_of_two(nr_table_entries + 1);
++	
++	lopt_size += nr_table_entries * sizeof(struct request_sock *);
++
++	if (lopt_size > PAGE_SIZE)
++		lopt = vzalloc(lopt_size);
++	else
++		lopt = kzalloc(lopt_size, GFP_KERNEL);
++	if (lopt == NULL)
++		return -ENOMEM;
++
++	for (lopt->max_qlen_log = 3;
++	     (1 << lopt->max_qlen_log) < nr_table_entries;
++	     lopt->max_qlen_log++);
++
++
++    /****************************************/
++    /* allocate and init struct accept_sock */
++    /****************************************/
++	/* here we must check value of n: n <= CPU number, n - is pow of 2*/
++	n = roundup_pow_of_two(n - 1);
++
++	aopt_size += n * sizeof(struct estab_tbl_entry);
++
++	if (aopt_size > PAGE_SIZE)
++		aopt = vzalloc(aopt_size);
++	else
++		aopt = kzalloc(aopt_size, GFP_KERNEL);
++	if (aopt == NULL)
++		return -ENOMEM;
++
++
++	for (i = 0; i < n; i++)
++		aopt->estab_table[i].rskq_accept_head = NULL;
++
++
++	get_random_bytes(&lopt->hash_rnd, sizeof(lopt->hash_rnd));
++	get_random_bytes(&aopt->hash_rnd, sizeof(aopt->hash_rnd));
++
++	rwlock_init(&queue->syn_wait_lock);
++
++	lopt->nr_table_entries = nr_table_entries;
++	aopt->nr_table_entries = n;
++
++	write_lock_bh(&queue->syn_wait_lock);
++	queue->listen_opt = lopt;
++	queue->accept_opt = aopt;
++	write_unlock_bh(&queue->syn_wait_lock);
++    //printk(KERN_ALERT "exit from reqsk_queue_alloc2()!\n");
++	return 0;
++}
++
++void __reqsk_queue_destroy(struct request_sock_queue *queue)
++{
++	struct listen_sock *lopt; 
++	struct accept_sock *aopt;
++	size_t lopt_size, aopt_size;
+ 
+ 	/*
+ 	 * this is an error recovery path only
+@@ -84,10 +158,21 @@
+ 	lopt_size = sizeof(struct listen_sock) +
+ 		lopt->nr_table_entries * sizeof(struct request_sock *);
+ 
++	aopt = queue->accept_opt;
++	aopt_size = sizeof(struct accept_sock) +
++		aopt->nr_table_entries * sizeof(struct request_sock *);	
++
+ 	if (lopt_size > PAGE_SIZE)
+ 		vfree(lopt);
+ 	else
+ 		kfree(lopt);
++
++	if (aopt) {
++		if (aopt_size > PAGE_SIZE)
++			vfree(aopt);
++	    else
++	    	kfree(aopt);
++	}
+ }
+ 
+ static inline struct listen_sock *reqsk_queue_yank_listen_sk(
+diff -ruN linux-3.10.20-orig/net/ipv4/af_inet.c linux-3.10.20/net/ipv4/af_inet.c
+--- linux-3.10.20-orig/net/ipv4/af_inet.c	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/net/ipv4/af_inet.c	2013-12-22 14:52:40.147608546 +0400
+@@ -237,6 +237,7 @@
+ 			goto out;
+ 	}
+ 	sk->sk_max_ack_backlog = backlog;
++	sk->sk_bqueues = 0;	
+ 	err = 0;
+ 
+ out:
+@@ -245,6 +246,52 @@
+ }
+ EXPORT_SYMBOL(inet_listen);
+ 
++
++/*
++ *	Move a socket into listening state.
++ */
++int inet_listen2(struct socket *sock, int backlog, int n)
++{
++	struct sock *sk = sock->sk;
++	unsigned char old_state;
++	int err;
++
++	lock_sock(sk);
++
++	err = -EINVAL;
++	if (sock->state != SS_UNCONNECTED || sock->type != SOCK_STREAM)
++		goto out;
++
++	old_state = sk->sk_state;
++	if (!((1 << old_state) & (TCPF_CLOSE | TCPF_LISTEN)))
++		goto out;
++
++	/* Really, if the socket is already in listen state
++	 * we can only allow the backlog to be adjusted.
++	 */
++	if (old_state != TCP_LISTEN) {
++		/* Check special setups for testing purpose to enable TFO w/o
++		 * requiring TCP_FASTOPEN sockopt.
++		 * Note that only TCP sockets (SOCK_STREAM) will reach here.
++		 * Also fastopenq may already been allocated because this
++		 * socket was in TCP_LISTEN state previously but was
++		 * shutdown() (rather than close()).
++		 */
++		err = inet_csk_listen_start2(sk, backlog, n);
++		if (err)
++			goto out;
++	}
++	sk->sk_max_ack_backlog = backlog;
++	sk->sk_bqueues = n;
++	err = 0;
++
++out:
++	release_sock(sk);
++	return err;
++}
++EXPORT_SYMBOL(inet_listen2);
++
++
+ u32 inet_ehash_secret __read_mostly;
+ EXPORT_SYMBOL(inet_ehash_secret);
+ 
+@@ -701,7 +748,10 @@
+ {
+ 	struct sock *sk1 = sock->sk;
+ 	int err = -EINVAL;
+-	struct sock *sk2 = sk1->sk_prot->accept(sk1, flags, &err);
++	struct sock *sk2;
++    
++    printk(KERN_ALERT "inet_accept(): before sk1->sk_prot->accept()\n");
++	sk2 = sk1->sk_prot->accept(sk1, flags, &err);
+ 
+ 	if (!sk2)
+ 		goto do_err;
+@@ -724,6 +774,35 @@
+ EXPORT_SYMBOL(inet_accept);
+ 
+ 
++int inet_accept2(struct socket *sock, struct socket *newsock, int flags, int i)
++{
++	struct sock *sk1 = sock->sk;
++	int err = -EINVAL;
++	struct sock *sk2; 
++
++    printk(KERN_ALERT "inet_accept2(): before sk1->sk_prot->accept2(), i = %d\n", i);
++	sk2 = sk1->sk_prot->accept2(sk1, flags, &err, i);
++
++	if (!sk2)
++		goto do_err;
++
++	lock_sock(sk2);
++
++	sock_rps_record_flow(sk2);
++	WARN_ON(!((1 << sk2->sk_state) &
++		  (TCPF_ESTABLISHED | TCPF_SYN_RECV |
++		  TCPF_CLOSE_WAIT | TCPF_CLOSE)));
++
++	sock_graft(sk2, newsock);
++
++	newsock->state = SS_CONNECTED;
++	err = 0;
++	release_sock(sk2);
++do_err:
++	return err;
++}
++EXPORT_SYMBOL(inet_accept2);
++
+ /*
+  *	This does both peername and sockname.
+  */
+@@ -939,10 +1018,13 @@
+ 	.connect	   = inet_stream_connect,
+ 	.socketpair	   = sock_no_socketpair,
+ 	.accept		   = inet_accept,
++	.accept2	   = inet_accept2,	
+ 	.getname	   = inet_getname,
+ 	.poll		   = tcp_poll,
++	.poll2		   = tcp_poll2,	
+ 	.ioctl		   = inet_ioctl,
+ 	.listen		   = inet_listen,
++	.listen2	   = inet_listen2,	
+ 	.shutdown	   = inet_shutdown,
+ 	.setsockopt	   = sock_common_setsockopt,
+ 	.getsockopt	   = sock_common_getsockopt,
+diff -ruN linux-3.10.20-orig/net/ipv4/inet_connection_sock.c linux-3.10.20/net/ipv4/inet_connection_sock.c
+--- linux-3.10.20-orig/net/ipv4/inet_connection_sock.c	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/net/ipv4/inet_connection_sock.c	2013-12-22 14:48:14.093010286 +0400
+@@ -24,6 +24,8 @@
+ #include <net/tcp_states.h>
+ #include <net/xfrm.h>
+ 
++#include <linux/kernel.h>  /* Needed for KERN_ALERT */
++ 
+ #ifdef INET_CSK_DEBUG
+ const char inet_csk_timer_bug_msg[] = "inet_csk BUG: unknown timer value\n";
+ EXPORT_SYMBOL(inet_csk_timer_bug_msg);
+@@ -275,13 +277,16 @@
+ 	 * having to remove and re-insert us on the wait queue.
+ 	 */
+ 	for (;;) {
++
+ 		prepare_to_wait_exclusive(sk_sleep(sk), &wait,
+ 					  TASK_INTERRUPTIBLE);
+ 		release_sock(sk);
++		printk (KERN_ALERT "inet_csk_wait_for_connect(): before 'if (reqsk_queue_empty())'\n");
+ 		if (reqsk_queue_empty(&icsk->icsk_accept_queue))
+ 			timeo = schedule_timeout(timeo);
+ 		lock_sock(sk);
+ 		err = 0;
++		printk (KERN_ALERT "inet_csk_wait_for_connect(): before 'if (!reqsk_queue_empty())'\n");
+ 		if (!reqsk_queue_empty(&icsk->icsk_accept_queue))
+ 			break;
+ 		err = -EINVAL;
+@@ -298,6 +303,57 @@
+ 	return err;
+ }
+ 
++
++static int inet_csk_wait_for_connect2(struct sock *sk, long timeo, int i)
++{
++	struct inet_connection_sock *icsk = inet_csk(sk);
++	DEFINE_WAIT(wait);
++	int err;
++
++	/*
++	 * True wake-one mechanism for incoming connections: only
++	 * one process gets woken up, not the 'whole herd'.
++	 * Since we do not 'race & poll' for established sockets
++	 * anymore, the common case will execute the loop only once.
++	 *
++	 * Subtle issue: "add_wait_queue_exclusive()" will be added
++	 * after any current non-exclusive waiters, and we know that
++	 * it will always _stay_ after any new non-exclusive waiters
++	 * because all non-exclusive waiters are added at the
++	 * beginning of the wait-queue. As such, it's ok to "drop"
++	 * our exclusiveness temporarily when we get woken up without
++	 * having to remove and re-insert us on the wait queue.
++	 */
++	for (;;) {
++		prepare_to_wait_exclusive(sk_sleep(sk), &wait,
++					  TASK_INTERRUPTIBLE);
++		release_sock(sk);
++
++		printk (KERN_ALERT "inet_csk_wait_for_connect2(): before 'if (reqsk_queue_empty2())', i = %d\n", i);
++
++		if (reqsk_queue_empty2(&icsk->icsk_accept_queue, i))
++			timeo = schedule_timeout(timeo);
++		lock_sock(sk);
++		err = 0;
++
++		printk (KERN_ALERT "inet_csk_wait_for_connect2(): before 'if (!reqsk_queue_empty2())', i = %d\n", i);
++
++		if (!reqsk_queue_empty2(&icsk->icsk_accept_queue, i))
++			break;
++		err = -EINVAL;
++		if (sk->sk_state != TCP_LISTEN)
++			break;
++		err = sock_intr_errno(timeo);
++		if (signal_pending(current))
++			break;
++		err = -EAGAIN;
++		if (!timeo)
++			break;
++	}
++	finish_wait(sk_sleep(sk), &wait);
++	return err;
++}
++
+ /*
+  * This will accept the next outstanding connection.
+  */
+@@ -317,7 +373,7 @@
+ 	error = -EINVAL;
+ 	if (sk->sk_state != TCP_LISTEN)
+ 		goto out_err;
+-
++    
+ 	/* Find already established connection */
+ 	if (reqsk_queue_empty(queue)) {
+ 		long timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
+@@ -327,10 +383,15 @@
+ 		if (!timeo)
+ 			goto out_err;
+ 
++        printk(KERN_ALERT "inet_csk_accept(): before 'inet_csk_wait_for_connect()'\n");
++
+ 		error = inet_csk_wait_for_connect(sk, timeo);
+ 		if (error)
+ 			goto out_err;
+ 	}
++
++	printk(KERN_ALERT "inet_csk_accept(): before 'reqsk_queue_remove()'\n");
++
+ 	req = reqsk_queue_remove(queue);
+ 	newsk = req->sk;
+ 
+@@ -362,6 +423,73 @@
+ }
+ EXPORT_SYMBOL(inet_csk_accept);
+ 
++
++struct sock *inet_csk_accept2(struct sock *sk, int flags, int *err, int i)
++{
++	struct inet_connection_sock *icsk = inet_csk(sk);
++	struct request_sock_queue *queue = &icsk->icsk_accept_queue;
++	struct sock *newsk;
++	struct request_sock *req;
++	int error;
++
++	lock_sock(sk);
++
++	/* We need to make sure that this socket is listening,
++	 * and that it has something pending.
++	 */
++	error = -EINVAL;
++	if (sk->sk_state != TCP_LISTEN)
++		goto out_err;
++	/* Find already established connection */
++	if (reqsk_queue_empty2(queue, i)) {
++		long timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
++
++		/* If this is a non blocking socket don't sleep */
++		error = -EAGAIN;
++		if (!timeo)
++			goto out_err;
++
++        printk(KERN_ALERT "inet_csk_accept2(): before 'inet_csk_wait_for_connect2()', i = %d\n", i);
++
++		error = inet_csk_wait_for_connect2(sk, timeo, i);
++		if (error)
++			goto out_err;
++	}
++
++	printk(KERN_ALERT "inet_csk_accept2(): before 'reqsk_queue_remove2()', i = %d\n", i);
++
++	req = reqsk_queue_remove2(queue, i);
++	newsk = req->sk;
++
++	sk_acceptq_removed(sk);
++	if (sk->sk_protocol == IPPROTO_TCP && queue->fastopenq != NULL) {
++		spin_lock_bh(&queue->fastopenq->lock);
++		if (tcp_rsk(req)->listener) {
++			/* We are still waiting for the final ACK from 3WHS
++			 * so can't free req now. Instead, we set req->sk to
++			 * NULL to signify that the child socket is taken
++			 * so reqsk_fastopen_remove() will free the req
++			 * when 3WHS finishes (or is aborted).
++			 */
++			req->sk = NULL;
++			req = NULL;
++		}
++		spin_unlock_bh(&queue->fastopenq->lock);
++	}
++out:
++	release_sock(sk);
++	if (req)
++		__reqsk_free(req);
++	return newsk;
++out_err:
++	newsk = NULL;
++	req = NULL;
++	*err = error;
++	goto out;
++}
++EXPORT_SYMBOL(inet_csk_accept2);
++
++
+ /*
+  * Using different timers for retransmit, delayed acks and probes
+  * We may wish use just one timer maintaining a list of expire jiffies
+@@ -477,11 +605,11 @@
+ }
+ EXPORT_SYMBOL_GPL(inet_csk_route_child_sock);
+ 
+-static inline u32 inet_synq_hash(const __be32 raddr, const __be16 rport,
++/*static inline u32 inet_synq_hash(const __be32 raddr, const __be16 rport,
+ 				 const u32 rnd, const u32 synq_hsize)
+ {
+ 	return jhash_2words((__force u32)raddr, (__force u32)rport, rnd) & (synq_hsize - 1);
+-}
++}*/
+ 
+ #if IS_ENABLED(CONFIG_IPV6)
+ #define AF_INET_FAMILY(fam) ((fam) == AF_INET)
+@@ -782,33 +910,124 @@
+ }
+ EXPORT_SYMBOL_GPL(inet_csk_listen_start);
+ 
++
++int inet_csk_listen_start2(struct sock *sk, const int nr_table_entries, int n)
++{
++	struct inet_sock *inet = inet_sk(sk);
++	struct inet_connection_sock *icsk = inet_csk(sk);
++	int rc;
++
++	rc = reqsk_queue_alloc2(&icsk->icsk_accept_queue, nr_table_entries, n);
++
++	if (rc != 0)
++		return rc;
++	
++	sk->sk_max_ack_backlog = 0;
++	sk->sk_ack_backlog = 0;
++	inet_csk_delack_init(sk);
++
++	/* There is race window here: we announce ourselves listening,
++	 * but this transition is still not validated by get_port().
++	 * It is OK, because this socket enters to hash table only
++	 * after validation is complete.
++	 */
++	sk->sk_state = TCP_LISTEN;
++	if (!sk->sk_prot->get_port(sk, inet->inet_num)) {
++		inet->inet_sport = htons(inet->inet_num);
++
++		sk_dst_reset(sk);
++		sk->sk_prot->hash(sk);
++
++		return 0;
++	}
++
++	sk->sk_state = TCP_CLOSE;
++	__reqsk_queue_destroy(&icsk->icsk_accept_queue);
++	return -EADDRINUSE;
++}
++EXPORT_SYMBOL_GPL(inet_csk_listen_start2);
++
+ /*
+  *	This routine closes sockets which have been at least partially
+  *	opened, but not yet accepted.
+  */
+ void inet_csk_listen_stop(struct sock *sk)
+ {
++	int i;
+ 	struct inet_connection_sock *icsk = inet_csk(sk);
+ 	struct request_sock_queue *queue = &icsk->icsk_accept_queue;
+ 	struct request_sock *acc_req;
+ 	struct request_sock *req;
++	size_t aopt_size;
+ 
+ 	inet_csk_delete_keepalive_timer(sk);
+ 
+-	/* make all the listen_opt local to us */
+-	acc_req = reqsk_queue_yank_acceptq(queue);
++	if (sk->sk_bqueues > 0) {
++		/* queue->rskq_accept_head already == NULL, cause socket was created by listen2(). We can destroy lopt */
++		reqsk_queue_destroy(queue);
+ 
+-	/* Following specs, it would be better either to send FIN
+-	 * (and enter FIN-WAIT-1, it is normal close)
+-	 * or to send active reset (abort).
+-	 * Certainly, it is pretty dangerous while synflood, but it is
+-	 * bad justification for our negligence 8)
+-	 * To be honest, we are not able to make either
+-	 * of the variants now.			--ANK
+-	 */
+-	reqsk_queue_destroy(queue);
++		for (i = 0; i < sk->sk_bqueues; ++i) {
++		    /* make all the listen_opt local to us */
++	        acc_req = reqsk_queue_yank_acceptq2(queue, i);
++
++	        while ((req = acc_req) != NULL) {
++		        struct sock *child = req->sk;
++
++		        acc_req = req->dl_next;
++
++		        local_bh_disable();
++		        bh_lock_sock(child);
++		        WARN_ON(sock_owned_by_user(child));
++		        sock_hold(child);
++
++		        sk->sk_prot->disconnect(child, O_NONBLOCK);
++
++		        sock_orphan(child);
++
++		        percpu_counter_inc(sk->sk_prot->orphan_count);
++
++		        if (sk->sk_protocol == IPPROTO_TCP && tcp_rsk(req)->listener) {
++			        BUG_ON(tcp_sk(child)->fastopen_rsk != req);
++			        BUG_ON(sk != tcp_rsk(req)->listener);
++
++			        tcp_sk(child)->fastopen_rsk = NULL;
++			        sock_put(sk);
++		        }
+ 
+-	while ((req = acc_req) != NULL) {
++		        inet_csk_destroy_sock(child);
++
++		        bh_unlock_sock(child);
++		        local_bh_enable();
++		        sock_put(child);
++
++		        sk_acceptq_removed(sk);
++		        __reqsk_free(req);
++	        }	        
++		}
++
++	    aopt_size = sizeof(struct accept_sock) + queue->accept_opt->nr_table_entries * sizeof(struct request_sock *);	
++
++		if (aopt_size > PAGE_SIZE)
++			vfree(queue->accept_opt);
++	    else
++	    	kfree(queue->accept_opt);		
++	}
++
++	else {
++	  /* make all the listen_opt local to us */
++	  acc_req = reqsk_queue_yank_acceptq(queue);
++
++	  /* Following specs, it would be better either to send FIN
++	   * (and enter FIN-WAIT-1, it is normal close)
++	   * or to send active reset (abort).
++	   * Certainly, it is pretty dangerous while synflood, but it is
++	   * bad justification for our negligence 8)
++	   * To be honest, we are not able to make either
++	   * of the variants now.			--ANK
++	   */
++	  reqsk_queue_destroy(queue);
++
++	  while ((req = acc_req) != NULL) {
+ 		struct sock *child = req->sk;
+ 
+ 		acc_req = req->dl_next;
+@@ -845,7 +1064,9 @@
+ 
+ 		sk_acceptq_removed(sk);
+ 		__reqsk_free(req);
+-	}
++	  }
++    }
++
+ 	if (queue->fastopenq != NULL) {
+ 		/* Free all the reqs queued in rskq_rst_head. */
+ 		spin_lock_bh(&queue->fastopenq->lock);
+diff -ruN linux-3.10.20-orig/net/ipv4/tcp.c linux-3.10.20/net/ipv4/tcp.c
+--- linux-3.10.20-orig/net/ipv4/tcp.c	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/net/ipv4/tcp.c	2013-12-22 14:44:43.466904219 +0400
+@@ -280,6 +280,7 @@
+ #include <asm/uaccess.h>
+ #include <asm/ioctls.h>
+ 
++
+ int sysctl_tcp_fin_timeout __read_mostly = TCP_FIN_TIMEOUT;
+ 
+ int sysctl_tcp_min_tso_segs __read_mostly = 2;
+@@ -439,8 +440,9 @@
+ 	const struct tcp_sock *tp = tcp_sk(sk);
+ 
+ 	sock_poll_wait(file, sk_sleep(sk), wait);
+-	if (sk->sk_state == TCP_LISTEN)
++	if (sk->sk_state == TCP_LISTEN) {
+ 		return inet_csk_listen_poll(sk);
++	}
+ 
+ 	/* Socket is not locked. We are protected from async events
+ 	 * by poll logic and correct handling of state changes
+@@ -527,6 +529,104 @@
+ }
+ EXPORT_SYMBOL(tcp_poll);
+ 
++
++unsigned int tcp_poll2(struct file *file, struct socket *sock, poll_table *wait, int i)
++{
++	unsigned int mask;
++	struct sock *sk = sock->sk;
++	const struct tcp_sock *tp = tcp_sk(sk);
++
++	sock_poll_wait(file, sk_sleep(sk), wait);
++	if (sk->sk_state == TCP_LISTEN) {
++		printk(KERN_ALERT "tcp_poll2(): before inet_csk_listen_poll2()\n");
++		return inet_csk_listen_poll2(sk, i);
++	}
++
++	/* Socket is not locked. We are protected from async events
++	 * by poll logic and correct handling of state changes
++	 * made by other threads is impossible in any case.
++	 */
++
++	mask = 0;
++
++	/*
++	 * POLLHUP is certainly not done right. But poll() doesn't
++	 * have a notion of HUP in just one direction, and for a
++	 * socket the read side is more interesting.
++	 *
++	 * Some poll() documentation says that POLLHUP is incompatible
++	 * with the POLLOUT/POLLWR flags, so somebody should check this
++	 * all. But careful, it tends to be safer to return too many
++	 * bits than too few, and you can easily break real applications
++	 * if you don't tell them that something has hung up!
++	 *
++	 * Check-me.
++	 *
++	 * Check number 1. POLLHUP is _UNMASKABLE_ event (see UNIX98 and
++	 * our fs/select.c). It means that after we received EOF,
++	 * poll always returns immediately, making impossible poll() on write()
++	 * in state CLOSE_WAIT. One solution is evident --- to set POLLHUP
++	 * if and only if shutdown has been made in both directions.
++	 * Actually, it is interesting to look how Solaris and DUX
++	 * solve this dilemma. I would prefer, if POLLHUP were maskable,
++	 * then we could set it on SND_SHUTDOWN. BTW examples given
++	 * in Stevens' books assume exactly this behaviour, it explains
++	 * why POLLHUP is incompatible with POLLOUT.	--ANK
++	 *
++	 * NOTE. Check for TCP_CLOSE is added. The goal is to prevent
++	 * blocking on fresh not-connected or disconnected socket. --ANK
++	 */
++	if (sk->sk_shutdown == SHUTDOWN_MASK || sk->sk_state == TCP_CLOSE)
++		mask |= POLLHUP;
++	if (sk->sk_shutdown & RCV_SHUTDOWN)
++		mask |= POLLIN | POLLRDNORM | POLLRDHUP;
++
++	/* Connected or passive Fast Open socket? */
++	if (sk->sk_state != TCP_SYN_SENT &&
++	    (sk->sk_state != TCP_SYN_RECV || tp->fastopen_rsk != NULL)) {
++		int target = sock_rcvlowat(sk, 0, INT_MAX);
++
++		if (tp->urg_seq == tp->copied_seq &&
++		    !sock_flag(sk, SOCK_URGINLINE) &&
++		    tp->urg_data)
++			target++;
++
++		/* Potential race condition. If read of tp below will
++		 * escape above sk->sk_state, we can be illegally awaken
++		 * in SYN_* states. */
++		if (tp->rcv_nxt - tp->copied_seq >= target)
++			mask |= POLLIN | POLLRDNORM;
++
++		if (!(sk->sk_shutdown & SEND_SHUTDOWN)) {
++			if (sk_stream_wspace(sk) >= sk_stream_min_wspace(sk)) {
++				mask |= POLLOUT | POLLWRNORM;
++			} else {  /* send SIGIO later */
++				set_bit(SOCK_ASYNC_NOSPACE,
++					&sk->sk_socket->flags);
++				set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
++
++				/* Race breaker. If space is freed after
++				 * wspace test but before the flags are set,
++				 * IO signal will be lost.
++				 */
++				if (sk_stream_wspace(sk) >= sk_stream_min_wspace(sk))
++					mask |= POLLOUT | POLLWRNORM;
++			}
++		} else
++			mask |= POLLOUT | POLLWRNORM;
++
++		if (tp->urg_data & TCP_URG_VALID)
++			mask |= POLLPRI;
++	}
++	/* This barrier is coupled with smp_wmb() in tcp_reset() */
++	smp_rmb();
++	if (sk->sk_err)
++		mask |= POLLERR;
++
++	return mask;
++}
++EXPORT_SYMBOL(tcp_poll2);
++
+ int tcp_ioctl(struct sock *sk, int cmd, unsigned long arg)
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+diff -ruN linux-3.10.20-orig/net/ipv4/tcp_ipv4.c linux-3.10.20/net/ipv4/tcp_ipv4.c
+--- linux-3.10.20-orig/net/ipv4/tcp_ipv4.c	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/net/ipv4/tcp_ipv4.c	2013-12-16 21:52:59.245235767 +0400
+@@ -2856,6 +2856,7 @@
+ 	.connect		= tcp_v4_connect,
+ 	.disconnect		= tcp_disconnect,
+ 	.accept			= inet_csk_accept,
++	.accept2		= inet_csk_accept2,	
+ 	.ioctl			= tcp_ioctl,
+ 	.init			= tcp_v4_init_sock,
+ 	.destroy		= tcp_v4_destroy_sock,
+diff -ruN linux-3.10.20-orig/net/ipv4/tcp_minisocks.c linux-3.10.20/net/ipv4/tcp_minisocks.c
+--- linux-3.10.20-orig/net/ipv4/tcp_minisocks.c	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/net/ipv4/tcp_minisocks.c	2013-12-20 14:28:34.923612601 +0400
+@@ -700,8 +700,18 @@
+ 
+ 	inet_csk_reqsk_queue_unlink(sk, req, prev);
+ 	inet_csk_reqsk_queue_removed(sk, req);
++    
++	if (sk->sk_bqueues > 0) { 
++		printk(KERN_ALERT "tcp_check_req(): before inet_csk_reqsk_queue_add2()\n");
++	    inet_csk_reqsk_queue_add2(sk, req, child);
+ 
+-	inet_csk_reqsk_queue_add(sk, req, child);
++	} 
++	else {
++		printk(KERN_ALERT "tcp_check_req(): before inet_csk_reqsk_queue_add()\n");
++	    inet_csk_reqsk_queue_add(sk, req, child);
++	}
++
++	
+ 	return child;
+ 
+ listen_overflow:
+diff -ruN linux-3.10.20-orig/net/socket.c linux-3.10.20/net/socket.c
+--- linux-3.10.20-orig/net/socket.c	2013-11-21 00:28:01.000000000 +0400
++++ linux-3.10.20/net/socket.c	2013-12-22 14:44:15.514621183 +0400
+@@ -105,6 +105,8 @@
+ #include <linux/sockios.h>
+ #include <linux/atalk.h>
+ 
++
++
+ static int sock_no_open(struct inode *irrelevant, struct file *dontcare);
+ static ssize_t sock_aio_read(struct kiocb *iocb, const struct iovec *iov,
+ 			 unsigned long nr_segs, loff_t pos);
+@@ -115,6 +117,8 @@
+ static int sock_close(struct inode *inode, struct file *file);
+ static unsigned int sock_poll(struct file *file,
+ 			      struct poll_table_struct *wait);
++static unsigned int sock_poll2(struct file *file,
++			      struct poll_table_struct *wait, int i);
+ static long sock_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+ #ifdef CONFIG_COMPAT
+ static long compat_sock_ioctl(struct file *file,
+@@ -137,7 +141,8 @@
+ 	.llseek =	no_llseek,
+ 	.aio_read =	sock_aio_read,
+ 	.aio_write =	sock_aio_write,
+-	.poll =		sock_poll,
++	.poll =		    sock_poll,
++	.poll2 =		sock_poll2,	
+ 	.unlocked_ioctl = sock_ioctl,
+ #ifdef CONFIG_COMPAT
+ 	.compat_ioctl = compat_sock_ioctl,
+@@ -1148,9 +1153,23 @@
+ 	 *      We can't return errors to poll, so it's either yes or no.
+ 	 */
+ 	sock = file->private_data;
+-	return sock->ops->poll(file, sock, wait);
++
++    return sock->ops->poll(file, sock, wait);
+ }
+ 
++static unsigned int sock_poll2(struct file *file, poll_table *wait, int i)
++{
++	struct socket *sock;
++
++	/*
++	 *      We can't return errors to poll, so it's either yes or no.
++	 */
++	sock = file->private_data;
++    printk(KERN_ALERT "sock_poll2(): before sock->ops->poll2()\n");
++    return sock->ops->poll2(file, sock, wait, i);
++}
++
++
+ static int sock_mmap(struct file *file, struct vm_area_struct *vma)
+ {
+ 	struct socket *sock = file->private_data;
+@@ -1544,6 +1563,27 @@
+ 	return err;
+ }
+ 
++SYSCALL_DEFINE3(listen2, int, fd, int, backlog, int, n)
++{   
++	struct socket *sock;
++	int err, fput_needed;
++	int somaxconn;
++
++	sock = sockfd_lookup_light(fd, &err, &fput_needed);
++	if (sock) {
++		somaxconn = sock_net(sock->sk)->core.sysctl_somaxconn;
++		if ((unsigned int)backlog > somaxconn)
++			backlog = somaxconn;
++
++		err = security_socket_listen(sock, backlog);
++		if (!err)
++			err = sock->ops->listen2(sock, backlog, n);
++
++		fput_light(sock->file, fput_needed);
++	}
++	return err;
++}
++
+ /*
+  *	For accept, we attempt to create a new socket, set up the link
+  *	with the client, wake up the client, then return the new
+@@ -1637,6 +1677,90 @@
+ 	goto out_put;
+ }
+ 
++
++SYSCALL_DEFINE5(accept2, int, fd, struct sockaddr __user *, upeer_sockaddr,
++		int __user *, upeer_addrlen, int, flags, int, i)
++{
++	struct socket *sock, *newsock;
++	struct file *newfile;
++	int err, len, newfd, fput_needed;
++	struct sockaddr_storage address;
++
++	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
++		return -EINVAL;
++
++	if (SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK))
++		flags = (flags & ~SOCK_NONBLOCK) | O_NONBLOCK;
++
++	sock = sockfd_lookup_light(fd, &err, &fput_needed);
++	if (!sock)
++		goto out;
++
++	err = -ENFILE;
++	newsock = sock_alloc();
++	if (!newsock)
++		goto out_put;
++
++	newsock->type = sock->type;
++	newsock->ops = sock->ops;
++
++	/*
++	 * We don't need try_module_get here, as the listening socket (sock)
++	 * has the protocol module (sock->ops->owner) held.
++	 */
++	__module_get(newsock->ops->owner);
++
++	newfd = get_unused_fd_flags(flags);
++	if (unlikely(newfd < 0)) {
++		err = newfd;
++		sock_release(newsock);
++		goto out_put;
++	}
++	newfile = sock_alloc_file(newsock, flags, sock->sk->sk_prot_creator->name);
++	if (unlikely(IS_ERR(newfile))) {
++		err = PTR_ERR(newfile);
++		put_unused_fd(newfd);
++		sock_release(newsock);
++		goto out_put;
++	}
++
++	err = security_socket_accept(sock, newsock);
++	if (err)
++		goto out_fd;
++
++    printk (KERN_ALERT "accept2(): before sock->ops->accept2(), i = %d", i);
++
++	err = sock->ops->accept2(sock, newsock, sock->file->f_flags, i);
++	if (err < 0)
++		goto out_fd;
++
++	if (upeer_sockaddr) {
++		if (newsock->ops->getname(newsock, (struct sockaddr *)&address,
++					  &len, 2) < 0) {
++			err = -ECONNABORTED;
++			goto out_fd;
++		}
++		err = move_addr_to_user(&address,
++					len, upeer_sockaddr, upeer_addrlen);
++		if (err < 0)
++			goto out_fd;
++	}
++
++	/* File flags are not inherited via accept() unlike another OSes. */
++
++	fd_install(newfd, newfile);
++	err = newfd;
++
++out_put:
++	fput_light(sock->file, fput_needed);
++out:
++	return err;
++out_fd:
++	fput(newfile);
++	put_unused_fd(newfd);
++	goto out_put;
++}
++
+ SYSCALL_DEFINE3(accept, int, fd, struct sockaddr __user *, upeer_sockaddr,
+ 		int __user *, upeer_addrlen)
+ {
+@@ -2432,11 +2556,11 @@
+ #ifdef __ARCH_WANT_SYS_SOCKETCALL
+ /* Argument list sizes for sys_socketcall */
+ #define AL(x) ((x) * sizeof(unsigned long))
+-static const unsigned char nargs[21] = {
++static const unsigned char nargs[23] = {
+ 	AL(0), AL(3), AL(3), AL(3), AL(2), AL(3),
+ 	AL(3), AL(3), AL(4), AL(4), AL(4), AL(6),
+ 	AL(6), AL(2), AL(5), AL(5), AL(3), AL(3),
+-	AL(4), AL(5), AL(4)
++	AL(4), AL(5), AL(4), AL(3), AL(5)
+ };
+ 
+ #undef AL
+@@ -2455,8 +2579,7 @@
+ 	unsigned long a0, a1;
+ 	int err;
+ 	unsigned int len;
+-
+-	if (call < 1 || call > SYS_SENDMMSG)
++	if (call < 1 || call > SYS_ACCEPT2)
+ 		return -EINVAL;
+ 
+ 	len = nargs[call];
+@@ -2487,6 +2610,9 @@
+ 	case SYS_LISTEN:
+ 		err = sys_listen(a0, a1);
+ 		break;
++	case SYS_LISTEN2:
++		err = sys_listen2(a0, a1, a[2]);
++		break;		
+ 	case SYS_ACCEPT:
+ 		err = sys_accept4(a0, (struct sockaddr __user *)a1,
+ 				  (int __user *)a[2], 0);
+@@ -2547,6 +2673,10 @@
+ 		err = sys_accept4(a0, (struct sockaddr __user *)a1,
+ 				  (int __user *)a[2], a[3]);
+ 		break;
++	case SYS_ACCEPT2:
++		err = sys_accept2(a0, (struct sockaddr __user *)a1,
++				  (int __user *)a[2], a[3], a[4]);
++		break;		
+ 	default:
+ 		err = -EINVAL;
+ 		break;
+@@ -3357,6 +3487,12 @@
+ }
+ EXPORT_SYMBOL(kernel_listen);
+ 
++int kernel_listen2(struct socket *sock, int backlog, int n)
++{
++	return 0;
++}
++EXPORT_SYMBOL(kernel_listen2);
++
+ int kernel_accept(struct socket *sock, struct socket **newsock, int flags)
+ {
+ 	struct sock *sk = sock->sk;
